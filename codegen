@@ -1,0 +1,163 @@
+#! /usr/local/bin/sage
+
+from sage.all import *
+import numpy as np
+import itertools
+import sys
+
+F = GF(2)
+
+def get_T(n):
+    T = np.zeros((n,)*6, dtype=object)
+    for i, j, k in itertools.product(range(n), repeat=3):
+        T[i, j, j, k , k, i] = 1
+    return T
+
+def tp(*ms):
+    if len(ms) == 1:
+        return ms[0]
+    return np.tensordot(ms[0], tp(*ms[1:]), axes=0)
+
+def t2p(t):
+    return list(t.flatten())
+
+class VarGroupsHandler:
+    def __init__(self, X1, X3, polys):
+        self.X1 = X1
+        self.X3 = X3
+        self.polys = polys
+        self.n = X1.shape[1]
+        self.r1 = X1.shape[0]
+        self.r3 = X3.shape[0]
+        self.known = {X3[k, s, i, i] for k in range(self.r3) for i in range(self.n) for s in range(3)}
+        self.known.update(X1[k, i, i] for k in range(self.r1) for i in range(self.n))
+    @staticmethod
+    def is_linear(p, vg):
+        # implementation only for polynomials without powers of variables!
+        for x in vg:
+            if not vg.isdisjoint(p.coefficient(x).variables()):
+                return False
+        return True
+    def extract_polys(self, vg):
+        total = self.known | vg
+        linear = []
+        nonlinear = []
+        for p in self.polys:
+            if not total.issuperset(p.variables()) or vg.isdisjoint(p.variables()):
+                continue
+            if self.is_linear(p, vg):
+                linear.append(p)
+            else:
+                nonlinear.append(p)
+        return linear, nonlinear
+    def generate(self):
+        k = 0
+        for q in range(self.n):
+            for m in range(q):
+                for i, j in [(q, m), (m, q)]:
+                    vg = {self.X3[k, s, i, j] for k in range(self.r3) for s in range(3)}
+                    vg.update(self.X1[k, i, j] for k in range(self.r1))
+                    linear, nonlinear = self.extract_polys(vg)
+                    yield k, vg, linear, nonlinear, q + 1
+                    self.known.update(vg)
+                    k += 1
+
+class Builder:
+    def __init__(self):
+        self.table = dict()
+        self.prefix = []
+        self.suffix = []
+    def make_func(self, X1, X3):
+        n = X1.shape[1]
+        r1 = X1.shape[0]
+        r3 = X3.shape[0]
+        name = 'codes'
+        self.prefix.append(f'int check(codes_t {name}) {{')
+        self.suffix.append('}')
+        self.suffix.append('return 0;')
+        D1 = np.empty((r1, n), dtype=object)
+        for k, i in itertools.product(*map(range, D1.shape)):
+            D1[k, i] = X1[k, i, i]
+        D3 = np.empty((r3, n, 3), dtype=object)
+        for k, i, s in itertools.product(*map(range, D3.shape)):
+            D3[k, i, s] = X3[k, s, i, i]
+        for i, x in enumerate(itertools.chain(D1.flatten(), D3.flatten())):
+            self.table[x] = f'GET({name}, {i})'
+    def evaluate(self, p):
+        if p == 0:
+            return '0u'
+        return ' ^ '.join('1u' if m == 1 else f"({'&'.join(self.table[x] for x in m.variables())})" for m in p.monomials())
+    def make_cycle(self, k, vg, polys, dim):
+        vg = tuple(sorted(vg, key=str))
+        n = len(polys)
+        m = len(vg)
+        augmented_matrix = f'A{k}'
+        nsols = f'nsols{k}'
+        basis = f'basis{k}'
+        cnt = f'cnt{k}'
+        sol = f'x{k}'
+        self.prefix.append(f'row_t {augmented_matrix}[{n}] = {{0}};');
+        for i, p in enumerate(polys):
+            q = p
+            for j, x in enumerate(vg):
+                c = p.coefficient(x)
+                self.prefix.append(f'SET({augmented_matrix}[{i}], {j}, {self.evaluate(c)});')
+                q += x*c
+            if q:
+                self.prefix.append(f'SET({augmented_matrix}[{i}], COLS, {self.evaluate(q)});')
+        self.prefix.append(f'row_t {nsols};\nrow_t {basis}[COLS+1] = {{0}};')
+        self.prefix.append(f'row_t {sol} = bin_gauss({augmented_matrix}, {n}, &{nsols}, {basis});')
+        if dim:
+            self.prefix.append(f'if ({nsols} < {2**dim}) continue;')
+        self.prefix.append(f'row_t {cnt} = 0;')
+        self.prefix.append(f'if (!{sol} && {nsols}) NEXT({cnt}, {sol}, {basis});')
+        self.prefix.append(f'for (; {cnt} < {nsols}; NEXT({cnt}, {sol}, {basis})) {{')
+        self.suffix.append('}')
+        for j, x in enumerate(vg):
+            self.table[x] = f'GET({sol}, {j})'
+    def make_polys_check(self, polys):
+        for p in polys:
+            self.prefix.append(f'if ({self.evaluate(p)}) continue;')
+    def make_exit(self):
+        self.prefix.append('return 1;')
+    def write(self, n, r, r3): 
+        row_width = r
+        w = 32 # min(w for w in (8, 16, 32, 64) if row_width < w)
+        row_t = f'uint_fast{w}_t'
+        defs_code = f'#define COLS {row_width}\ntypedef uint_fast{w}_t row_t;\n#define PRIROWT "%"PRIuFAST{w}\n#define SIGNATURE {(n << 16) | (r << 8) | r3}u\n'
+        with open('gauss.c', 'r') as gfile:
+            gauss_code = gfile.read()
+        check_code = '\n'.join(self.prefix + self.suffix[::-1] + [''])
+        name = 'check'
+        with open(f'{name}.c', 'w') as fc:
+            fc.write('\n'.join(('/*  this file is autogenerated by codegen  */\n', defs_code, gauss_code, check_code)))
+
+def main():
+    assert len(sys.argv) == 4
+    n = int(sys.argv[1])
+    r = int(sys.argv[2])
+    r3 = int(sys.argv[3])
+    r1 = r - 3 * r3
+    print(f'{n = }, {r = }, {r1 = }, {r3 = }')
+    assert r1 >= 0
+    T = get_T(n)
+    R = PolynomialRing(F, 'x', r*n*n)
+    I = R.ideal([x*x-x for x in R.gens()])
+    X1 = np.array(R.gens()[:r1*n*n]).reshape(r1, n, n)
+    X3 = np.array(R.gens()[r1*n*n:]).reshape(r3, 3, n, n)
+    Y = sum(tp(u, u, u) for u in X1) + sum(tp(u, v, w) + tp(v, w, u) + tp(w, u, v) for u, v, w in X3)
+    polys = sorted(set(p.reduce(I) for p in t2p(Y - T)) - {0}, key=str)
+    builder = Builder()
+    builder.make_func(X1, X3)
+    vgh = VarGroupsHandler(X1, X3, polys)
+    for k, vg, linear, nonlinear, q in vgh.generate():
+        dim = (n**2 - n) - (q**2 - q)
+        if k == 0:
+            dim = 0
+        builder.make_cycle(k, vg, linear, dim)
+        builder.make_polys_check(nonlinear)
+    builder.make_exit()
+    builder.write(n, r, r3)
+
+main()
+
