@@ -8,18 +8,18 @@ typedef uint64_t codes_t;
 
 enum state_t {START, RUN, STOP};
 
-void print_time(double s) {
+void print_time(double s, FILE* fout) {
     double m = s / 60;
     double h = m / 60;
     double d = h / 24;
     if (s < 100) {
-        printf("%.1f s", s);
+        fprintf(fout, "%.1f s", s);
     } else if (m < 100) {
-        printf("%.1f m", m);
+        fprintf(fout, "%.1f m", m);
     } else if (h < 100) {
-        printf("%.1f h", h);
+        fprintf(fout, "%.1f h", h);
     } else {
-        printf("%.1f d", d);
+        fprintf(fout, "%.1f d", d);
     }
 }
 
@@ -42,14 +42,16 @@ int main(int argc, char** argv) {
     codes_t * codes_array = calloc(size, sizeof(codes_t));
     fread(codes_array, sizeof(codes_t), size, fp);
     fclose(fp);
-    printf("read %"PRIu32" codes\n", size);
+    //printf("read %"PRIu32" codes\n", size);
     double start = omp_get_wtime();
     int solutions = 0;
     int i = 0, processed = 0;
     #pragma omp parallel shared(i, processed) reduction(+: solutions)
     {
+	    /*
         #pragma omp master
         printf("got %d threads\n", omp_get_num_threads());
+	*/
         enum state_t state = START;
         int j0, j1;
         while (state != STOP) {
@@ -60,14 +62,15 @@ int main(int argc, char** argv) {
                     double elapsed = omp_get_wtime() - start;
                     double ratio = (double) processed / size;
                     double time_estimate = elapsed / ratio;
-                    printf("%.2f%%\t", ratio * 100.0);
-                    print_time(elapsed);
-                    printf(" + ");
-                    print_time(time_estimate - elapsed);
-                    printf(" = ");
-                    print_time(time_estimate);
-                    printf("          \r");
-                    fflush(stdout);
+		    FILE* fout = fopen(OUT_NAME, "w");
+                    fprintf(fout, "%.2f%%\t", ratio * 100.0);
+                    print_time(elapsed, fout);
+                    fprintf(fout, " + ");
+                    print_time(time_estimate - elapsed, fout);
+                    fprintf(fout, " = ");
+                    print_time(time_estimate, fout);
+                    fprintf(fout, "\n");
+		    fclose(fout);
                 } else {
                     state = RUN;
                 }
@@ -88,12 +91,20 @@ int main(int argc, char** argv) {
 	        int t = check(codes_array[j]);
                 solutions += t;
                 if (t) {
-                    printf("found "PRIROWT"          \n", codes_array[j]);
+                    #pragma omp critical
+                    {
+                        printf("found "PRIROWT"          \n", codes_array[j]);
+		        FILE* ffound = fopen("foundlist", "a");
+		        fprintf(ffound, "%u "PRIROWT"\n", SIGNATURE, codes_array[j]);
+		        fclose(ffound);
+                    }
                 }
             }
         }
     }
     double end = omp_get_wtime();
-    printf("processed in %.2f s          \nsolutions: %d\n", end - start, solutions);
+    FILE* fout = fopen(OUT_NAME, "w");
+    fprintf(fout, "processed in %.2f s          \nsolutions: %d\n", end - start, solutions);
+    fclose(fout);
     free(codes_array);
 }

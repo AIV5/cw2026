@@ -1,0 +1,1 @@
+g++ -std=gnu++23 -O3 diagen.cpp -o diagen
