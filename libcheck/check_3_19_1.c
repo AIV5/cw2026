@@ -4,7 +4,7 @@
 typedef uint_fast32_t row_t;
 #define PRIROWT "%"PRIuFAST32
 #define SIGNATURE 201473u
-
+#define OUT_NAME "out_3_19_1"
 #define GET(X, K) (((X) >> (K)) & 1u)
 #define SET(X, K, V) (X) |= (V) << (K)
 #define NEXT(K, X, B) (X ^= B[__builtin_ctz(++K)])
